@@ -1,0 +1,7 @@
+# Core (simulator + brain) needs nothing but the stdlib.
+# Swarm extras:
+pandas>=2.0
+pyarrow>=14.0
+huggingface_hub>=0.23
+# Training (GPU session only):
+# torch>=2.2
