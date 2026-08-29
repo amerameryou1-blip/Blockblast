@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import shutil
 import time
 from datetime import datetime, timezone
 
@@ -36,6 +37,7 @@ from simulator.engine import Game
 WORKER_ID = os.environ.get("WORKER_ID", "0")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HF_DATASET = os.environ.get("HF_DATASET", "")
+LOCAL_DATA_DIR = os.environ.get("LOCAL_DATA_DIR", "")  # set => local mode, no HF
 SYNC_MINUTES = float(os.environ.get("SYNC_MINUTES", "15"))
 MAX_MINUTES = float(os.environ.get("MAX_MINUTES", "690"))
 BEAM_WIDTH = int(os.environ.get("BEAM_WIDTH", "12"))
@@ -70,11 +72,12 @@ def _push(api, local_path: str, repo_path: str) -> None:
 def main() -> None:
     import pandas as pd
 
-    if not HF_TOKEN or not HF_DATASET:
-        raise SystemExit("set HF_TOKEN and HF_DATASET")
-
-    api = _hf()
-    api.create_repo(HF_DATASET, repo_type="dataset", exist_ok=True)
+    api = None
+    if not LOCAL_DATA_DIR:
+        if not HF_TOKEN or not HF_DATASET:
+            raise SystemExit("set HF_TOKEN and HF_DATASET (or LOCAL_DATA_DIR for local mode)")
+        api = _hf()
+        api.create_repo(HF_DATASET, repo_type="dataset", exist_ok=True)
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     rng = random.Random(hash((WORKER_ID, run_id)) & 0xFFFFFFFF)
@@ -90,14 +93,13 @@ def main() -> None:
     print(f"[worker {WORKER_ID}] run={run_id} beam={BEAM_WIDTH} eps={EPSILON}")
 
     def flush() -> None:
-        nonlocal seq, buf, games, score_hist
+        nonlocal seq, buf, score_hist
         if not buf:
             return
         df = pd.DataFrame(buf)
         shard = f"shards/run={run_id}/worker={WORKER_ID}/{seq:05d}.parquet"
         lp = f"out/{seq:05d}.parquet"
         df.to_parquet(lp, index=False)
-        _push(api, lp, shard)
         meta = {
             "worker": WORKER_ID, "run": run_id, "seq": seq,
             "shard": shard, "rows": len(df), "games": len(score_hist),
@@ -108,11 +110,17 @@ def main() -> None:
         mp = f"out/{seq:05d}.json"
         with open(mp, "w") as f:
             json.dump(meta, f)
-        _push(api, mp, f"meta/worker={WORKER_ID}/{run_id}_{seq:05d}.json")
-        print(f"[worker {WORKER_ID}] pushed shard {seq} "
+        meta_path = f"meta/worker={WORKER_ID}/{run_id}_{seq:05d}.json"
+        if LOCAL_DATA_DIR:
+            for src, dst in ((lp, shard), (mp, meta_path)):
+                target = os.path.join(LOCAL_DATA_DIR, dst)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.move(src, target)
+        else:
+            _push(api, lp, shard)
+            _push(api, mp, meta_path)
+        print(f"[worker {WORKER_ID}] flushed shard {seq} "
               f"({len(df)} rows, {games} games total)")
-        os.remove(lp)
-        os.remove(mp)
         seq += 1
         buf = []
         score_hist = []
@@ -130,7 +138,7 @@ def main() -> None:
                 "game_id": game_id, "turn": turn, "board": g.board,
                 "p0": g.pieces[0], "p1": g.pieces[1], "p2": g.pieces[2],
                 "slot": act[0], "ar": act[1], "ac": act[2],
-                "reward": reward, "done": done,
+                "reward": reward, "done": done, "score": g.score,
             })
         for row in rows_this:  # attach outcome label for supervised targets
             row["final_score"] = g.score

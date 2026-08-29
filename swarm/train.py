@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HF_DATASET = os.environ.get("HF_DATASET", "")
 HF_MODEL = os.environ.get("HF_MODEL", "")
+LOCAL_DATA_DIR = os.environ.get("LOCAL_DATA_DIR", "")  # set => train from local shards
 MAX_ROWS = int(os.environ.get("MAX_ROWS", "500000"))
 EPOCHS = int(os.environ.get("EPOCHS", "3"))
 
@@ -41,11 +42,12 @@ def build_tensors(rows):
             pid = int(row[key])
             if pid < 0:
                 continue
-            some = PLACEMENTS[pid][(0, 0)]  # shape alone, at origin
+            some = PLACEMENTS[pid][(0, 0)]
             for c in range(64):
                 if some >> c & 1:
                     boards[i, 1 + slot, c // 8, c % 8] = 1.0
-        target[i, 0] = float(row["final_score"])
+        remaining = max(0.0, float(row["final_score"]) - float(row.get("score") or 0.0))
+        target[i, 0] = remaining
     return boards, target.log1p()
 
 
@@ -69,15 +71,18 @@ def main() -> None:
     import torch
     from huggingface_hub import HfApi, snapshot_download
 
-    if not (HF_TOKEN and HF_DATASET and HF_MODEL):
-        raise SystemExit("set HF_TOKEN, HF_DATASET, HF_MODEL")
-    api = HfApi(token=HF_TOKEN)
-    api.create_repo(HF_MODEL, repo_type="model", exist_ok=True)
-
-    snap = snapshot_download(HF_DATASET, repo_type="dataset", token=HF_TOKEN,
-                             allow_patterns="shards/**")
-    rows = fn = None
     import glob
+
+    if LOCAL_DATA_DIR:
+        snap = LOCAL_DATA_DIR
+        api = HfApi(token=HF_TOKEN) if HF_TOKEN and HF_MODEL else None
+    else:
+        if not (HF_TOKEN and HF_DATASET and HF_MODEL):
+            raise SystemExit("set HF_TOKEN, HF_DATASET, HF_MODEL (or LOCAL_DATA_DIR)")
+        api = HfApi(token=HF_TOKEN)
+        api.create_repo(HF_MODEL, repo_type="model", exist_ok=True)
+        snap = snapshot_download(HF_DATASET, repo_type="dataset", token=HF_TOKEN,
+                                 allow_patterns="shards/**")
 
     files = sorted(glob.glob(f"{snap}/shards/**/*.parquet", recursive=True))
     dfs = []
@@ -98,6 +103,7 @@ def main() -> None:
 
     n = len(x)
     idx = list(range(n))
+    epoch_losses: list[float] = []
     for epoch in range(EPOCHS):
         random.shuffle(idx)
         tot = 0.0
@@ -107,19 +113,28 @@ def main() -> None:
             opt.zero_grad()
             loss.backward()
             opt.step()
-            tot += float(loss)
-        print(f"epoch {epoch}: mse={tot:.2f}")
+            tot += float(loss.detach())
+        epoch_losses.append(tot)
+        print(f"epoch {epoch}: mse={tot:.2f}", flush=True)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     torch.save({"state_dict": model.state_dict(), "rows": n}, "checkpoint.pt")
     meta = {"rows": n, "epochs": EPOCHS, "final_mse": tot, "ts": stamp,
-            "games_source": HF_DATASET}
+            "losses": epoch_losses, "games_source": HF_DATASET}
     with open("metrics.json", "w") as f:
         json.dump(meta, f, indent=1)
-    for name in ("checkpoint.pt", "metrics.json"):
-        api.upload_file(path_or_fileobj=name, path_in_repo=name,
-                        repo_id=HF_MODEL, commit_message=f"train {stamp} ({n} rows)")
-    print("pushed checkpoint + metrics to", HF_MODEL)
+    if api is not None:
+        for name in ("checkpoint.pt", "metrics.json"):
+            api.upload_file(path_or_fileobj=name, path_in_repo=name,
+                            repo_id=HF_MODEL, commit_message=f"train {stamp} ({n} rows)")
+        print("pushed checkpoint + metrics to", HF_MODEL)
+    else:
+        os.makedirs("checkpoints", exist_ok=True)
+        import shutil
+
+        shutil.move("checkpoint.pt", f"checkpoints/value_{stamp}.pt")
+        shutil.move("metrics.json", f"checkpoints/metrics_{stamp}.json")
+        print(f"saved locally to checkpoints/ ({stamp})")
 
 
 if __name__ == "__main__":

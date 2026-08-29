@@ -124,10 +124,15 @@ def evaluate(game: Game, w: dict[str, float] | None = None) -> float:
 
 class BeamBrain:
     def __init__(self, width: int = 16, depth: int = 3,
-                 weights: dict[str, float] | None = None):
+                 weights: dict[str, float] | None = None,
+                 eval_fn=None):
         self.width = width
         self.depth = depth
         self.w = weights
+        self.eval_fn = eval_fn  # None => use hand-tuned heuristic
+
+    def _evaluate(self, g: Game) -> float:
+        return self.eval_fn(g) if self.eval_fn else evaluate(g, self.w)
 
     def choose(self, game: Game) -> tuple[int, int, int]:
         # candidates: (value, root_action, game_after)
@@ -135,7 +140,7 @@ class BeamBrain:
         for a in game.legal_actions():
             g = game.clone()
             g.step(a)
-            beam.append((evaluate(g, self.w), a, g))
+            beam.append((self._evaluate(g), a, g))
         if not beam:
             raise RuntimeError("no legal actions")
         beam.sort(reverse=True, key=lambda t: t[0])
@@ -149,7 +154,7 @@ class BeamBrain:
                 for a in g.legal_actions():
                     gg = g.clone()
                     gg.step(a)
-                    nxt.append((evaluate(gg, self.w), root, gg))
+                    nxt.append((self._evaluate(gg), root, gg))
             if not nxt:
                 break
             nxt.sort(reverse=True, key=lambda t: t[0])
