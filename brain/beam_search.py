@@ -23,6 +23,8 @@ DEFAULT_W = {
     "region": 0.6,         # largest contiguous empty region (room for big pieces)
     "near": 3.0,           # rows/cols missing <= 2 cells (clears within reach)
     "mobility": 4.0,       # min legal placements over offered pieces (survival)
+    "streak": 60.0,        # current combo streak (protect the multiplier!)
+    "setup": 5.0,          # lines missing exactly 1-2 cells right now
 }
 
 NEI = ((1, 0), (-1, 0), (0, 1), (0, -1))
@@ -93,15 +95,23 @@ def evaluate(game: Game, w: dict[str, float] | None = None) -> float:
                             stack.append((nr, nc))
             region_best = max(region_best, size)
 
-    # near-complete lines
+    # near-complete lines + setup count (missing <=2 cells)
+    near = 0
+    setup = 0
     for r in range(8):
         cnt = sum(_bits(b, r, c) for c in range(8))
         if cnt >= 6:
             near += 1
+        missing = 8 - cnt
+        if 1 <= missing <= 2:
+            setup += 1
     for c in range(8):
         cnt = sum(_bits(b, r, c) for r in range(8))
         if cnt >= 6:
             near += 1
+        missing = 8 - cnt
+        if 1 <= missing <= 2:
+            setup += 1
 
     # mobility: worst-offered-piece placement count
     mobility = min(64, min(
@@ -119,6 +129,8 @@ def evaluate(game: Game, w: dict[str, float] | None = None) -> float:
         + w["region"] * region_best
         + w["near"] * near
         + w["mobility"] * mobility
+        + w["streak"] * game.streak
+        + w["setup"] * setup
     )
 
 
