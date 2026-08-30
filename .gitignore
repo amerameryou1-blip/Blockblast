@@ -1,0 +1,25 @@
+# Byte-compiled / env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Data / artifacts (live on Hugging Face, not in git)
+data/
+checkpoints/
+*.parquet
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+out/
+logs/
+checkpoints/
+wmeta/
+outbox/
