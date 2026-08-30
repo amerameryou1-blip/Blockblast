@@ -38,6 +38,7 @@ WORKER_ID = os.environ.get("WORKER_ID", "0")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HF_DATASET = os.environ.get("HF_DATASET", "")
 LOCAL_DATA_DIR = os.environ.get("LOCAL_DATA_DIR", "")  # set => local mode, no HF
+OUTBOX = os.environ.get("OUTBOX", "outbox")  # staging; uploads retry from here
 SYNC_MINUTES = float(os.environ.get("SYNC_MINUTES", "15"))
 MAX_MINUTES = float(os.environ.get("MAX_MINUTES", "690"))
 BEAM_WIDTH = int(os.environ.get("BEAM_WIDTH", "12"))
@@ -52,21 +53,32 @@ def _hf():
     return HfApi(token=HF_TOKEN)
 
 
-def _push(api, local_path: str, repo_path: str) -> None:
-    for attempt in range(3):
+def _push(api, local_path: str, repo_path: str) -> bool:
+    """Try upload; return False (caller keeps the file) rather than crash."""
+    for attempt in range(2):
         try:
             api.upload_file(
                 path_or_fileobj=local_path,
                 path_in_repo=repo_path,
                 repo_id=HF_DATASET,
                 repo_type="dataset",
-                commit_message=f"worker {WORKER_ID}: {repo_path}",
+                commit_message=f"worker {WORKER_ID}: {os.path.basename(repo_path)}",
             )
-            return
-        except Exception as e:  # noqa: BLE001 — network on Kaggle is flaky; retry
-            print(f"  upload retry {attempt + 1}: {e}")
-            time.sleep(5 * (attempt + 1))
-    raise RuntimeError(f"failed to upload {repo_path}")
+            return True
+        except Exception as e:  # noqa: BLE001 — transient 429/5xx must not kill workers
+            print(f"  upload fail ({type(e).__name__}), retry {attempt + 1}")
+            time.sleep(20 * (attempt + 1))
+    return False
+
+
+def _drain_outbox(api) -> None:
+    """(Re)upload everything sitting in OUTBOX; delete on success."""
+    for dirpath, _, files in os.walk(OUTBOX):
+        for name in files:
+            lp = os.path.join(dirpath, name)
+            repo_path = os.path.relpath(lp, OUTBOX)
+            if _push(api, lp, repo_path):
+                os.remove(lp)
 
 
 def main() -> None:
@@ -83,7 +95,7 @@ def main() -> None:
     rng = random.Random(hash((WORKER_ID, run_id)) & 0xFFFFFFFF)
     brain = BeamBrain(width=BEAM_WIDTH, depth=3)
 
-    os.makedirs("out", exist_ok=True)
+    os.makedirs(OUTBOX, exist_ok=True)
     buf: list[dict] = []
     seq = 0
     games = 0
@@ -98,8 +110,6 @@ def main() -> None:
             return
         df = pd.DataFrame(buf)
         shard = f"shards/run={run_id}/worker={WORKER_ID}/{seq:05d}.parquet"
-        lp = f"out/{seq:05d}.parquet"
-        df.to_parquet(lp, index=False)
         meta = {
             "worker": WORKER_ID, "run": run_id, "seq": seq,
             "shard": shard, "rows": len(df), "games": len(score_hist),
@@ -107,20 +117,27 @@ def main() -> None:
             "score_max": max(score_hist, default=0),
             "ts": datetime.now(timezone.utc).isoformat(),
         }
-        mp = f"out/{seq:05d}.json"
-        with open(mp, "w") as f:
-            json.dump(meta, f)
         meta_path = f"meta/worker={WORKER_ID}/{run_id}_{seq:05d}.json"
-        if LOCAL_DATA_DIR:
-            for src, dst in ((lp, shard), (mp, meta_path)):
-                target = os.path.join(LOCAL_DATA_DIR, dst)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                shutil.move(src, target)
+        # Parquet shards stage in OUTBOX (drained to HF). Meta JSONs are kept
+        # in wmeta/ (worker-local): rate-limit budget is for data, not stats.
+        meta_local = os.path.join("wmeta", meta_path)
+        os.makedirs(os.path.dirname(meta_local), exist_ok=True)
+        with open(meta_local, "w") as f:
+            json.dump(meta, f)
+        shard_target = os.path.join(OUTBOX, shard)
+        os.makedirs(os.path.dirname(shard_target), exist_ok=True)
+        df.to_parquet(shard_target, index=False)
+        if api is None:  # local mode: move everything into LOCAL_DATA_DIR
+            dst = os.path.join(LOCAL_DATA_DIR, shard)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.move(shard_target, dst)
+            mdst = os.path.join(LOCAL_DATA_DIR, meta_path)
+            os.makedirs(os.path.dirname(mdst), exist_ok=True)
+            shutil.move(meta_local, mdst)
         else:
-            _push(api, lp, shard)
-            _push(api, mp, meta_path)
+            _drain_outbox(api)
         print(f"[worker {WORKER_ID}] flushed shard {seq} "
-              f"({len(df)} rows, {games} games total)")
+              f"({len(df)} rows, {games} games total)", flush=True)
         seq += 1
         buf = []
         score_hist = []

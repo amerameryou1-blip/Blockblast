@@ -21,3 +21,5 @@ checkpoints/
 out/
 logs/
 checkpoints/
+wmeta/
+outbox/
