@@ -26,6 +26,8 @@ ACCOUNTS = {
 }
 BRANCH = os.environ.get("BLOCKBLAST_BRANCH", "foundation")
 REPO_URL = f"https://github.com/amerameryou1-blip/Blockblast"
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+HF_DATASET = os.environ.get("HF_DATASET", "amer224/blockblast-selfplay")
 
 KERNEL_SCRIPT = r'''import os, subprocess, sys
 
@@ -40,16 +42,15 @@ subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pandas", "pyarrow
 env = dict(os.environ)
 env.update(dict(
     WORKER_ID=str({WID}),
-    LOCAL_DATA_DIR="/kaggle/working/data",
-    SYNC_MINUTES="10",
+    HF_TOKEN=os.environ.get("HF_TOKEN", "{HF_TOKEN}"),
+    HF_DATASET=os.environ.get("HF_DATASET", "{HF_DATASET}"),
+    SYNC_MINUTES="20",
     MAX_MINUTES="600",
     BEAM_WIDTH="8",
     EPSILON="0.05",
+    OUTBOX="/tmp/outbox",
+    PYTHONPATH="/kaggle/working/repo",
 ))
-# If HF_TOKEN (Kaggle Secret) is set in the kernel environment, workers push
-# shards to HF directly; otherwise they land in this kernel's output.
-if os.environ.get("HF_TOKEN") and os.environ.get("HF_DATASET"):
-    env.pop("LOCAL_DATA_DIR", None)
 subprocess.run([sys.executable, "-m", "swarm.worker"], env=env)
 print("worker done")
 '''
@@ -99,7 +100,9 @@ def _kernel_dir(user: str, slug: str, wid: int, gpu: bool) -> str:
     code = (KERNEL_SCRIPT
             .replace("{WID}", str(wid))
             .replace("{REPO}", REPO_URL)
-            .replace("{BRANCH}", BRANCH))
+            .replace("{BRANCH}", BRANCH)
+            .replace("{HF_TOKEN}", HF_TOKEN)
+            .replace("{HF_DATASET}", HF_DATASET))
     with open(os.path.join(d, "main.py"), "w") as f:
         f.write(code)
     return d
