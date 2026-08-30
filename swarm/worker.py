@@ -43,6 +43,7 @@ SYNC_MINUTES = float(os.environ.get("SYNC_MINUTES", "15"))
 MAX_MINUTES = float(os.environ.get("MAX_MINUTES", "690"))
 BEAM_WIDTH = int(os.environ.get("BEAM_WIDTH", "12"))
 EPSILON = float(os.environ.get("EPSILON", "0.05"))
+HF_DATA_DIR = os.environ.get("HF_DATA_DIR", "")  # set => also mirror shards locally
 
 BUF_LIMIT = 50_000  # rows
 
@@ -72,13 +73,16 @@ def _push(api, local_path: str, repo_path: str) -> bool:
 
 
 def _drain_outbox(api) -> None:
-    """(Re)upload everything sitting in OUTBOX; delete on success."""
+    """(Re)upload everything in OUTBOX; delete on success. Never fatal."""
     for dirpath, _, files in os.walk(OUTBOX):
         for name in files:
             lp = os.path.join(dirpath, name)
             repo_path = os.path.relpath(lp, OUTBOX)
-            if _push(api, lp, repo_path):
-                os.remove(lp)
+            try:
+                if _push(api, lp, repo_path):
+                    os.remove(lp)
+            except Exception:
+                pass  # keep for next cycle
 
 
 def main() -> None:
@@ -135,6 +139,10 @@ def main() -> None:
             os.makedirs(os.path.dirname(mdst), exist_ok=True)
             shutil.move(meta_local, mdst)
         else:
+            if HF_DATA_DIR:  # mirror locally so upload hiccups can't cost data
+                dst = os.path.join(HF_DATA_DIR, shard)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copyfile(shard_target, dst)
             _drain_outbox(api)
         print(f"[worker {WORKER_ID}] flushed shard {seq} "
               f"({len(df)} rows, {games} games total)", flush=True)
